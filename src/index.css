@@ -11,9 +11,9 @@
   --code-bg: #f6f8fa;
   --code-border: #d0d7de;
   --muted: #656d76;
-  --font-base: 16px;
-  --font-editor: 15px;
-  --font-code: 14px;
+  --font-base: 18px;
+  --font-editor: 17px;
+  --font-code: 16px;
   font-family: system-ui, -apple-system, 'Segoe UI', Helvetica, Arial, sans-serif;
   font-size: var(--font-base);
 }
