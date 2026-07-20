@@ -1,6 +1,6 @@
 # Markdown 转换器
 
-一个纯前端的在线 Markdown 渲染工具，左侧编辑右侧实时预览，支持 GitHub 风格 Markdown、代码高亮、数学公式与 Mermaid 图表。
+一个纯前端的在线 Markdown 渲染工具，左侧编辑右侧实时预览，支持 GitHub 风格 Markdown、代码高亮、数学公式与 Mermaid 图表，并支持两台设备通过 WebRTC 实时同步文字。
 
 🔗 在线体验：<https://katrina55553.github.io/MDTool/>
 
@@ -15,6 +15,7 @@
 - **本地缓存** —— 编辑内容与主题选择自动保存到 localStorage，刷新不丢失
 - **响应式布局** —— 桌面端左右分栏，移动端自动堆叠
 - **零后端依赖** —— 纯前端部署，可直接托管到任何静态站点服务
+- **双机协作** —— 基于 PeerJS 的 P2P 实时同步，两台设备（同网络下）输入对方 ID 即可双向编辑同一份内容，无需自建后端
 
 ## 技术栈
 
@@ -28,13 +29,14 @@
 | 数学公式 | rehype-katex + KaTeX |
 | 图表 | Mermaid |
 | 样式 | 原生 CSS + CSS 变量（主题切换） |
+| 双机协作 | PeerJS（WebRTC 数据通道 + 公共信令服务器） |
 | 部署 | GitHub Actions + GitHub Pages |
 
 ## 本地开发
 
 ### 环境要求
 
-- Node.js 18+（推荐 20）
+- Node.js 18+（推荐 20，Vite 5 强制要求）
 - npm 9+
 
 ### 启动步骤
@@ -53,6 +55,25 @@ npm run build
 npm run preview
 ```
 
+## 双机协作使用说明
+
+顶部工具栏中部的「我的 ID / 输入对方 ID」面板用于实时同步：
+
+1. **A 与 B 两台设备**同时打开本工具（需能访问公网，建议同一局域网更稳定）
+2. 等待 A、B 各自的「我的 ID」显示出来（一串随机字符串，由 PeerJS 公共信令服务器分配）
+3. A 点 ID 旁的复制按钮，把 ID 通过任意方式（微信/QQ/口述）发给 B
+4. B 在「输入对方 ID」框中粘贴 → 点「连接」
+5. 状态指示灯变绿即表示连接成功。**任一方编辑，另一方编辑器内容实时同步**
+
+### 协作机制
+
+- **传输方式**：PeerJS 默认走官方公共信令服务器（`0.peerjs.com`）完成一次握手，握手成功后两台设备之间建立 WebRTC 数据通道直连，文字在浏览器之间点对点传输，不经过任何自建后端
+- **同步粒度**：每次本地编辑（按键触发）即发送当前全文给对方，对方直接覆盖本地内容
+- **冲突策略**：简单覆盖，不合并、不锁定。两人同时编辑同一段会互相覆盖，适合"一人主笔 + 另一人补充"的场景
+- **首次同步**：连接刚建立时双方各推送一次当前内容给对方，后到者覆盖先到者
+- **断开重连**：点「断开」或关闭页面即结束会话；再次连接需重新交换 ID（PeerJS 每次会分配新 ID）
+- **同网络优势**：同 Wi-Fi/局域网下走局域网 IP 直连，延迟最低、最稳定；跨网络可能受 NAT 类型限制无法直连
+
 ## 项目结构
 
 ```
@@ -64,11 +85,12 @@ MDTool/
 │   │   ├── Editor.tsx              # CodeMirror 编辑器封装
 │   │   ├── Preview.tsx             # react-markdown 渲染与插件配置
 │   │   ├── MermaidBlock.tsx        # Mermaid 代码块自定义渲染
-│   │   └── Toolbar.tsx             # 顶部工具栏（标题 + 主题切换）
+│   │   └── Toolbar.tsx             # 顶部工具栏（标题 + 主题切换 + 双机协作面板）
 │   ├── context/
 │   │   └── ThemeContext.tsx        # 主题 Context + Provider
 │   ├── hooks/
-│   │   └── useLocalStorage.ts      # localStorage 持久化 Hook
+│   │   ├── useLocalStorage.ts      # localStorage 持久化 Hook
+│   │   └── usePeer.ts              # PeerJS 连接与收发封装
 │   ├── utils/
 │   │   └── sampleContent.ts        # 初始示例 Markdown 内容
 │   ├── App.tsx                     # 根组件（布局 + 状态编排）
@@ -156,6 +178,18 @@ flowchart LR
 ### 本地缓存
 
 `useLocalStorage` Hook 通用化封装 localStorage 读写，JSON 序列化 + try-catch 容错。用于持久化编辑器内容（key: `md-content`）与主题选择（key: `md-theme`）。
+
+### 双机实时同步
+
+`usePeer` Hook 封装 PeerJS 客户端：组件挂载时实例化 `Peer`，由公共信令服务器分配随机 ID；被动方监听 `connection` 事件接收来连请求，主动方调用 `peer.connect(remoteId)` 发起连接。连接建立后通过 `DataConnection` 双向发送字符串内容。
+
+`App.tsx` 把本地编辑与远端接收编织在一起：
+
+- 本地 `onChange` → 写 localStorage + `conn.send(content)` 发给对方
+- 远端 `conn.on('data')` → 直接 `setContent(remote)` 覆盖本地
+- 连接刚建立时各推送一次当前内容给对方做初始同步
+
+CodeMirror 的 `onChange` 只在用户真实输入时触发，`setValue` 不会回弹，因此不会形成循环。
 
 ## 许可证
 
