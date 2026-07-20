@@ -6,8 +6,13 @@ interface ToolbarProps {
   peerId: string
   peerStatus: PeerStatus
   peerError: string
+  incomingFrom: string
+  awaitingAccept: boolean
+  onInit: (id: string) => void
   onConnect: (remoteId: string) => void
   onDisconnect: () => void
+  onAccept: () => void
+  onReject: () => void
 }
 
 function SunIcon() {
@@ -38,16 +43,38 @@ function CopyIcon() {
 
 function statusLabel(status: PeerStatus): string {
   switch (status) {
-    case 'idle': return '未连接'
+    case 'idle': return '未设置 ID'
     case 'waiting': return '等待连接'
+    case 'incoming': return '收到请求'
     case 'connected': return '已连接'
     case 'error': return '连接错误'
   }
 }
 
-export default function Toolbar({ peerId, peerStatus, peerError, onConnect, onDisconnect }: ToolbarProps) {
+// 限制为 1-99 的整数
+function sanitizeIdInput(value: string): string {
+  const digits = value.replace(/\D/g, '').slice(0, 2)
+  if (!digits) return ''
+  const n = parseInt(digits, 10)
+  if (isNaN(n)) return ''
+  return String(Math.min(99, Math.max(1, n)))
+}
+
+export default function Toolbar({
+  peerId,
+  peerStatus,
+  peerError,
+  incomingFrom,
+  awaitingAccept,
+  onInit,
+  onConnect,
+  onDisconnect,
+  onAccept,
+  onReject,
+}: ToolbarProps) {
   const { theme, toggleTheme } = useTheme()
   const isDark = theme === 'dark'
+  const [myIdInput, setMyIdInput] = useState('')
   const [remoteId, setRemoteId] = useState('')
   const [copied, setCopied] = useState(false)
 
@@ -62,55 +89,101 @@ export default function Toolbar({ peerId, peerStatus, peerError, onConnect, onDi
     }
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleInitSubmit = (e: React.FormEvent) => {
     e.preventDefault()
-    if (remoteId.trim()) {
-      onConnect(remoteId.trim())
+    const v = sanitizeIdInput(myIdInput)
+    if (v) {
+      onInit(v)
+      setMyIdInput('')
+    }
+  }
+
+  const handleConnectSubmit = (e: React.FormEvent) => {
+    e.preventDefault()
+    const v = sanitizeIdInput(remoteId)
+    if (v) {
+      onConnect(v)
       setRemoteId('')
     }
   }
 
   const connected = peerStatus === 'connected'
+  const incoming = peerStatus === 'incoming'
+  const needInit = peerStatus === 'idle' && !peerId
 
   return (
     <header className="toolbar">
       <div className="toolbar-title">Markdown 转换器</div>
 
       <div className="peer-panel">
-        <div className="peer-id" title="你的设备 ID,发给对方让其连接">
-          <span className="peer-id-label">我的 ID:</span>
-          <code className="peer-id-value">{peerId || '获取中…'}</code>
-          {peerId && (
-            <button
-              type="button"
-              className="peer-copy-btn"
-              onClick={handleCopy}
-              title="复制 ID"
-              aria-label="复制 ID"
-            >
-              <CopyIcon />
-              {copied && <span className="peer-copy-tip">已复制</span>}
-            </button>
-          )}
-        </div>
-
-        {connected ? (
-          <button type="button" className="peer-btn peer-btn-disconnect" onClick={onDisconnect}>
-            断开 ({statusLabel(peerStatus)})
-          </button>
-        ) : (
-          <form className="peer-connect" onSubmit={handleSubmit}>
+        {needInit ? (
+          <form className="peer-connect" onSubmit={handleInitSubmit}>
+            <span className="peer-id-label">设置我的 ID (1-99):</span>
             <input
               type="text"
-              className="peer-input"
-              placeholder="输入对方 ID"
-              value={remoteId}
-              onChange={(e) => setRemoteId(e.target.value)}
+              inputMode="numeric"
+              className="peer-input peer-input-id"
+              placeholder="1-99"
+              value={myIdInput}
+              onChange={(e) => setMyIdInput(sanitizeIdInput(e.target.value))}
             />
-            <button type="submit" className="peer-btn" disabled={!remoteId.trim()}>
-              连接
+            <button type="submit" className="peer-btn" disabled={!sanitizeIdInput(myIdInput)}>
+              设置
             </button>
           </form>
+        ) : (
+          <>
+            <div className="peer-id" title="你的设备 ID,发给对方让其连接">
+              <span className="peer-id-label">我的 ID:</span>
+              <code className="peer-id-value">{peerId || '获取中…'}</code>
+              {peerId && (
+                <button
+                  type="button"
+                  className="peer-copy-btn"
+                  onClick={handleCopy}
+                  title="复制 ID"
+                  aria-label="复制 ID"
+                >
+                  <CopyIcon />
+                  {copied && <span className="peer-copy-tip">已复制</span>}
+                </button>
+              )}
+            </div>
+
+            {incoming ? (
+              <div className="peer-incoming">
+                <span className="peer-incoming-text">
+                  {incomingFrom || '对方'} 请求连接
+                </span>
+                <button type="button" className="peer-btn peer-btn-accept" onClick={onAccept}>
+                  接受
+                </button>
+                <button type="button" className="peer-btn peer-btn-reject" onClick={onReject}>
+                  拒绝
+                </button>
+              </div>
+            ) : connected ? (
+              <button type="button" className="peer-btn peer-btn-disconnect" onClick={onDisconnect}>
+                断开连接
+              </button>
+            ) : awaitingAccept ? (
+              <span className="peer-waiting-tip">等待对方确认…</span>
+            ) : (
+              <form className="peer-connect" onSubmit={handleConnectSubmit}>
+                <input
+                  type="text"
+                  inputMode="numeric"
+                  className="peer-input peer-input-id"
+                  placeholder="对方 ID (1-99)"
+                  value={remoteId}
+                  onChange={(e) => setRemoteId(sanitizeIdInput(e.target.value))}
+                />
+                <button type="submit" className="peer-btn" disabled={!sanitizeIdInput(remoteId)}>
+                  连接
+                </button>
+              </form>
+            )}
+          </>
         )}
 
         <span className={`peer-status peer-status-${peerStatus}`}>{statusLabel(peerStatus)}</span>
