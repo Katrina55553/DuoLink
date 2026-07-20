@@ -10,14 +10,45 @@ import Peer, { DataConnection } from 'peerjs'
 //   被动方接受 → 发 {type:'accept'},双方 connected
 //   被动方拒绝 → 发 {type:'reject'} 并关闭,主动方回到 waiting
 //   内容同步:双方 connected 后各发一次本地内容,后续编辑实时同步
+//   文件传输:{type:'file-meta'} 元数据 → 多条 {type:'file-chunk'} 分片 → {type:'file-end'}
+//            任一方可发 {type:'file-cancel'} 中断
 
 export type PeerStatus = 'idle' | 'waiting' | 'incoming' | 'connected' | 'error'
+
+export interface FileTransfer {
+  id: string
+  direction: 'send' | 'receive'
+  name: string
+  size: number
+  mime: string
+  transferred: number
+  status: 'active' | 'done' | 'error' | 'canceled'
+  error?: string
+}
 
 interface UsePeerOptions {
   onRemoteContent: (content: string) => void
 }
 
-type ControlMsg = { type: 'hello' } | { type: 'accept' } | { type: 'reject' }
+type ControlMsg =
+  | { type: 'hello' }
+  | { type: 'accept' }
+  | { type: 'reject' }
+  | { type: 'file-meta'; id: string; name: string; size: number; mime: string }
+  | { type: 'file-chunk'; id: string; index: number; data: ArrayBuffer }
+  | { type: 'file-end'; id: string }
+  | { type: 'file-cancel'; id: string }
+
+const MAX_FILE_SIZE = 200 * 1024 * 1024 // 200MB
+const CHUNK_SIZE = 16 * 1024 // 16KB,兼容所有浏览器
+const BUFFER_HIGH = 4 * 1024 * 1024 // 4MB,达到则暂停发送
+const BUFFER_LOW = 1 * 1024 * 1024 // 1MB,降到该值以下再继续
+
+interface ReceiverState {
+  meta: { id: string; name: string; size: number; mime: string }
+  chunks: Map<number, ArrayBuffer>
+  received: number
+}
 
 export function usePeer({ onRemoteContent }: UsePeerOptions) {
   const [myId, setMyId] = useState<string>('')
@@ -26,6 +57,7 @@ export function usePeer({ onRemoteContent }: UsePeerOptions) {
   const [incomingFrom, setIncomingFrom] = useState<string>('')
   // 主动方发起 connect 后等待对方 accept 期间为 true,用于 UI 区分"待机"与"等待确认"
   const [awaitingAccept, setAwaitingAccept] = useState(false)
+  const [transfers, setTransfers] = useState<FileTransfer[]>([])
 
   const peerRef = useRef<Peer | null>(null)
   const connRef = useRef<DataConnection | null>(null)
@@ -33,19 +65,134 @@ export function usePeer({ onRemoteContent }: UsePeerOptions) {
   const onRemoteRef = useRef(onRemoteContent)
   onRemoteRef.current = onRemoteContent
 
+  // 接收中的文件状态(按 fileId 索引)
+  const receiversRef = useRef<Map<string, ReceiverState>>(new Map())
+  // 发送方取消标记,由 cancelTransfer 设置,sendFile 循环检测
+  const cancelRef = useRef<Set<string>>(new Set())
+  // 已完成传输的自动清理定时器
+  const cleanupTimers = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map())
+
+  // 增量更新某条传输记录
+  const upsertTransfer = useCallback((t: FileTransfer) => {
+    setTransfers(prev => {
+      const idx = prev.findIndex(x => x.id === t.id)
+      if (idx === -1) return [...prev, t]
+      const next = prev.slice()
+      next[idx] = t
+      return next
+    })
+  }, [])
+
+  const scheduleRemoval = useCallback((id: string, delay = 3000) => {
+    // 已有定时器先清掉
+    const existing = cleanupTimers.current.get(id)
+    if (existing) clearTimeout(existing)
+    const timer = setTimeout(() => {
+      setTransfers(prev => prev.filter(x => x.id !== id))
+      cleanupTimers.current.delete(id)
+    }, delay)
+    cleanupTimers.current.set(id, timer)
+  }, [])
+
+  // 触发浏览器下载
+  const triggerDownload = useCallback((meta: ReceiverState['meta'], chunks: Map<number, ArrayBuffer>) => {
+    const arr = Array.from(chunks.entries())
+      .sort((a, b) => a[0] - b[0])
+      .map(([, buf]) => buf)
+    const blob = new Blob(arr, { type: meta.mime || 'application/octet-stream' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = meta.name
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    setTimeout(() => URL.revokeObjectURL(url), 1000)
+  }, [])
+
   // 处理收到的数据:返回消息类型供调用方决定状态切换
-  const handleData = useCallback((data: unknown): 'accept' | 'reject' | 'content' | null => {
+  const handleData = useCallback((data: unknown): 'accept' | 'reject' | 'content' | 'file' | null => {
     if (typeof data === 'string') {
       onRemoteRef.current(data)
       return 'content'
     }
     if (data && typeof data === 'object') {
       const msg = data as ControlMsg
-      if (msg.type === 'accept') return 'accept'
-      if (msg.type === 'reject') return 'reject'
+      switch (msg.type) {
+        case 'accept':
+          return 'accept'
+        case 'reject':
+          return 'reject'
+        case 'file-meta': {
+          const meta = { id: msg.id, name: msg.name, size: msg.size, mime: msg.mime }
+          receiversRef.current.set(msg.id, { meta, chunks: new Map(), received: 0 })
+          upsertTransfer({
+            id: meta.id,
+            direction: 'receive',
+            name: meta.name,
+            size: meta.size,
+            mime: meta.mime,
+            transferred: 0,
+            status: 'active',
+          })
+          return 'file'
+        }
+        case 'file-chunk': {
+          const r = receiversRef.current.get(msg.id)
+          if (r) {
+            r.chunks.set(msg.index, msg.data)
+            r.received += msg.data.byteLength
+            upsertTransfer({
+              id: r.meta.id,
+              direction: 'receive',
+              name: r.meta.name,
+              size: r.meta.size,
+              mime: r.meta.mime,
+              transferred: r.received,
+              status: 'active',
+            })
+          }
+          return 'file'
+        }
+        case 'file-end': {
+          const r = receiversRef.current.get(msg.id)
+          if (r) {
+            triggerDownload(r.meta, r.chunks)
+            upsertTransfer({
+              id: r.meta.id,
+              direction: 'receive',
+              name: r.meta.name,
+              size: r.meta.size,
+              mime: r.meta.mime,
+              transferred: r.meta.size,
+              status: 'done',
+            })
+            receiversRef.current.delete(msg.id)
+            scheduleRemoval(msg.id)
+          }
+          return 'file'
+        }
+        case 'file-cancel': {
+          const r = receiversRef.current.get(msg.id)
+          if (r) {
+            upsertTransfer({
+              id: r.meta.id,
+              direction: 'receive',
+              name: r.meta.name,
+              size: r.meta.size,
+              mime: r.meta.mime,
+              transferred: r.received,
+              status: 'canceled',
+            })
+            receiversRef.current.delete(msg.id)
+            scheduleRemoval(msg.id)
+          }
+          return 'file'
+        }
+      }
     }
     return null
-  }, [])
+  }, [upsertTransfer, scheduleRemoval, triggerDownload])
 
   // 通用 close/error 绑定
   const bindLifecycle = useCallback((conn: DataConnection, onAccept?: () => void) => {
@@ -62,6 +209,14 @@ export function usePeer({ onRemoteContent }: UsePeerOptions) {
     conn.on('close', () => {
       if (connRef.current === conn) connRef.current = null
       setAwaitingAccept(false)
+      // 连接断开:清理所有接收中和发送中的传输
+      receiversRef.current.clear()
+      cancelRef.current.clear()
+      setTransfers(prev => prev.map(t =>
+        t.status === 'active'
+          ? { ...t, status: 'error', error: '连接已断开' }
+          : t
+      ))
       setStatus('waiting')
     })
     conn.on('error', (err) => {
@@ -168,6 +323,8 @@ export function usePeer({ onRemoteContent }: UsePeerOptions) {
       peerRef.current = null
       connRef.current = null
       pendingConnRef.current = null
+      cleanupTimers.current.forEach(t => clearTimeout(t))
+      cleanupTimers.current.clear()
     }
   }, [])
 
@@ -197,5 +354,209 @@ export function usePeer({ onRemoteContent }: UsePeerOptions) {
     }
   }, [])
 
-  return { myId, status, error, incomingFrom, awaitingAccept, init, acceptConn, rejectConn, connect, disconnect, send }
+  // 拿到底层 RTCDataChannel 做背压控制(PeerJS 未在公开类型中暴露,但运行时存在)
+  const getDC = useCallback((conn: DataConnection): RTCDataChannel | null => {
+    const c = conn as unknown as { dataChannel?: RTCDataChannel; _dc?: RTCDataChannel }
+    return c.dataChannel ?? c._dc ?? null
+  }, [])
+
+  // 发送文件:分片 + 背压 + 可取消
+  const sendFile = useCallback(async (file: File): Promise<void> => {
+    const conn = connRef.current
+    if (!conn || !conn.open) {
+      setError('尚未连接,无法发送文件')
+      return
+    }
+    if (file.size > MAX_FILE_SIZE) {
+      setError(`文件超过 200MB 限制(当前 ${(file.size / 1024 / 1024).toFixed(1)} MB)`)
+      return
+    }
+    if (file.size === 0) {
+      setError('文件为空,无法发送')
+      return
+    }
+
+    const id = (crypto as Crypto & { randomUUID?: () => string }).randomUUID?.()
+      ?? `f-${Date.now()}-${Math.random().toString(36).slice(2)}`
+    const total = Math.ceil(file.size / CHUNK_SIZE)
+
+    upsertTransfer({
+      id,
+      direction: 'send',
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+      transferred: 0,
+      status: 'active',
+    })
+
+    const failWith = (err: string, transferred: number) => {
+      upsertTransfer({
+        id,
+        direction: 'send',
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+        transferred,
+        status: 'error',
+        error: err,
+      })
+      scheduleRemoval(id)
+    }
+
+    // 1. 发送元数据
+    try {
+      conn.send({ type: 'file-meta', id, name: file.name, size: file.size, mime: file.type } as ControlMsg)
+    } catch (e) {
+      failWith(String(e), 0)
+      return
+    }
+
+    // 2. 设置 bufferedAmountLowThreshold(若可访问 dataChannel)
+    const dc = getDC(conn)
+    if (dc) {
+      try { dc.bufferedAmountLowThreshold = BUFFER_LOW } catch { /* 忽略 */ }
+    }
+
+    // 3. 分片发送
+    for (let i = 0; i < total; i++) {
+      // 已取消
+      if (cancelRef.current.has(id)) {
+        cancelRef.current.delete(id)
+        try { conn.send({ type: 'file-cancel', id } as ControlMsg) } catch { /* 忽略 */ }
+        upsertTransfer({
+          id,
+          direction: 'send',
+          name: file.name,
+          size: file.size,
+          mime: file.type,
+          transferred: i * CHUNK_SIZE,
+          status: 'canceled',
+        })
+        scheduleRemoval(id)
+        return
+      }
+
+      const offset = i * CHUNK_SIZE
+      const end = Math.min(offset + CHUNK_SIZE, file.size)
+      let buf: ArrayBuffer
+      try {
+        buf = await file.slice(offset, end).arrayBuffer()
+      } catch (e) {
+        failWith(String(e), offset)
+        return
+      }
+
+      // 背压等待:bufferedAmount 超过阈值就等它降下来
+      if (dc) {
+        while (dc.bufferedAmount > BUFFER_HIGH) {
+          // 连接已断开则放弃
+          if (!connRef.current || connRef.current !== conn || !conn.open) {
+            failWith('连接已断开', offset)
+            return
+          }
+          await new Promise<void>(resolve => setTimeout(resolve, 10))
+        }
+      }
+
+      // 再次检查连接是否还在
+      if (!connRef.current || connRef.current !== conn || !conn.open) {
+        failWith('连接已断开', offset)
+        return
+      }
+
+      try {
+        conn.send({ type: 'file-chunk', id, index: i, data: buf } as ControlMsg)
+      } catch (e) {
+        failWith(String(e), offset)
+        return
+      }
+
+      upsertTransfer({
+        id,
+        direction: 'send',
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+        transferred: end,
+        status: 'active',
+      })
+    }
+
+    // 4. 循环结束后再次检查取消
+    if (cancelRef.current.has(id)) {
+      cancelRef.current.delete(id)
+      try { conn.send({ type: 'file-cancel', id } as ControlMsg) } catch { /* 忽略 */ }
+      upsertTransfer({
+        id,
+        direction: 'send',
+        name: file.name,
+        size: file.size,
+        mime: file.type,
+        transferred: file.size,
+        status: 'canceled',
+      })
+      scheduleRemoval(id)
+      return
+    }
+
+    // 5. 发送结束标记
+    try {
+      conn.send({ type: 'file-end', id } as ControlMsg)
+    } catch (e) {
+      failWith(String(e), file.size)
+      return
+    }
+
+    upsertTransfer({
+      id,
+      direction: 'send',
+      name: file.name,
+      size: file.size,
+      mime: file.type,
+      transferred: file.size,
+      status: 'done',
+    })
+    scheduleRemoval(id)
+  }, [upsertTransfer, scheduleRemoval, getDC])
+
+  // 取消传输(发送或接收都可调)
+  const cancelTransfer = useCallback((id: string) => {
+    setTransfers(prev => {
+      const t = prev.find(x => x.id === id)
+      if (!t || t.status !== 'active') return prev
+      if (t.direction === 'send') {
+        // 标记,由 sendFile 循环检测并通知对方
+        cancelRef.current.add(id)
+      } else {
+        // 接收端:通知对方停止 + 清理本地
+        const conn = connRef.current
+        if (conn && conn.open) {
+          try { conn.send({ type: 'file-cancel', id } as ControlMsg) } catch { /* 忽略 */ }
+        }
+        receiversRef.current.delete(id)
+        const next = prev.map(x => x.id === id ? { ...x, status: 'canceled' as const } : x)
+        scheduleRemoval(id)
+        return next
+      }
+      return prev
+    })
+  }, [scheduleRemoval])
+
+  return {
+    myId,
+    status,
+    error,
+    incomingFrom,
+    awaitingAccept,
+    transfers,
+    init,
+    acceptConn,
+    rejectConn,
+    connect,
+    disconnect,
+    send,
+    sendFile,
+    cancelTransfer,
+  }
 }

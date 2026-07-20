@@ -16,6 +16,7 @@
 - **响应式布局** —— 桌面端左右分栏，移动端自动堆叠
 - **零后端依赖** —— 纯前端部署，可直接托管到任何静态站点服务
 - **双机协作** —— 基于 PeerJS 的 P2P 实时同步，两台设备各设一个 1-99 的数字 ID，发起连接后由被动方确认接受/拒绝，确认通过即可双向编辑同一份内容，无需自建后端
+- **文件传输** —— 连接建立后可点对点发送任意类型文件（单文件 ≤ 200MB），分片 + 背压控制保证大文件稳定传输，接收方自动触发浏览器下载，无需登录或中转服务器
 
 ## 技术栈
 
@@ -67,6 +68,16 @@ npm run preview
 
 若 B 点「拒绝」，A 会收到「对方拒绝连接」提示并自动回到待机状态。
 
+### 文件传输
+
+连接成功后工具栏会出现「发送文件」按钮（绿色描边）。
+
+1. 任一方点「发送文件」→ 系统文件选择对话框 → 选中文件（≤ 200MB）即开始传输
+2. 工具栏下方会出现一张传输卡片，显示文件名、大小、进度条、百分比与「取消」按钮
+3. 接收方**无需确认**，卡片自动出现在其工具栏下方，进度同步推进
+4. 传输完成时接收方浏览器自动触发文件下载（保存到默认下载目录），双方卡片在 3 秒后自动消失
+5. 传输过程中任一方可点「×」取消，对方会收到 `file-cancel` 消息并停止；已发送/已接收的分片不会拼接成文件
+
 ### 协作机制
 
 - **ID 分配**：用户在工具栏手动输入 1-99 的整数作为 PeerJS 客户端 ID。由于 PeerJS 公共信令服务器上的 ID 全局唯一，100 以内的数字极易冲突，被占用时会提示并允许换号重试
@@ -75,7 +86,15 @@ npm run preview
 - **同步粒度**：每次本地编辑（按键触发）即发送当前全文给对方，对方直接覆盖本地内容
 - **冲突策略**：简单覆盖，不合并、不锁定。两人同时编辑同一段会互相覆盖，适合"一人主笔 + 另一人补充"的场景
 - **首次同步**：连接刚建立（双方都进入 connected）时各推送一次当前内容给对方，后到者覆盖先到者
-- **断开重连**：点「断开」或关闭页面即结束会话；再次连接需重新输入对方 ID 并重新确认
+- **文件传输协议**：在原有连接控制消息（`hello`/`accept`/`reject`）之上扩展四类消息：
+  - `file-meta`：文件元数据（id、文件名、大小、MIME）
+  - `file-chunk`：单分片（16KB ArrayBuffer + 序号）
+  - `file-end`：所有分片发送完毕
+  - `file-cancel`：任一方主动取消
+- **分片与背压**：单条 WebRTC DataChannel 消息有大小限制，文件按 16KB 切片顺序发送；通过监控底层 `RTCDataChannel.bufferedAmount`，达到 4MB 阈值时暂停发送、降到 1MB 以下再继续，避免大文件爆浏览器缓冲区
+- **接收端策略**：默认直接接收（不弹确认窗），用 `Map<index, ArrayBuffer>` 暂存所有分片，收到 `file-end` 时按序拼接为 `Blob` 并通过 `<a download>` 触发下载
+- **单文件限制**：当前一次只能发送一个文件，正在发送时按钮置灰；接收不受此限（理论上可同时收多个，但 UI 仍按一条卡片展示一个文件）
+- **断开重连**：点「断开」或关闭页面即结束会话；再次连接需重新输入对方 ID 并重新确认。连接中断时所有进行中的传输标记为失败
 - **同网络优势**：同 Wi-Fi/局域网下走局域网 IP 直连，延迟最低、最稳定；跨网络可能受 NAT 类型限制无法直连
 
 ## 项目结构
@@ -204,6 +223,41 @@ flowchart LR
 - 双方都进入 connected 时各推送一次当前内容给对方做初始同步
 
 CodeMirror 的 `onChange` 只在用户真实输入时触发，`setValue` 不会回弹，因此不会形成循环。
+
+### 文件传输
+
+文件传输复用 PeerJS 同一条 `DataConnection`，扩展四类应用层消息：
+
+| 消息 | 方向 | 含义 |
+|------|------|------|
+| `file-meta` | 发送方 → 接收方 | 文件元数据（id / 名称 / 大小 / MIME） |
+| `file-chunk` | 发送方 → 接收方 | 单分片（16KB ArrayBuffer + 序号） |
+| `file-end` | 发送方 → 接收方 | 所有分片发送完毕，触发接收方拼接下载 |
+| `file-cancel` | 双向 | 任一方主动取消 |
+
+**发送端**（`usePeer.sendFile`）：
+
+- 200MB 上限 + 空文件校验，超限直接报错
+- 生成 `crypto.randomUUID()` 作为本次传输 ID
+- 文件按 16KB 切片，`file.slice(offset, end).arrayBuffer()` 异步读取
+- 通过 `(conn as any).dataChannel ?? _dc` 拿到底层 `RTCDataChannel`，循环检测 `bufferedAmount`，超过 4MB 暂停发送、降到 1MB 以下再继续 —— 这是大文件不爆浏览器的关键
+- 每个 chunk 发送后更新 `transfers` 状态，UI 进度条随之推进
+- 取消标记用 `useRef<Set<string>>` 维护，发送循环每片检查；连接断开时整体标记为 `error`
+
+**接收端**（`handleData` 内 `file-meta` / `file-chunk` / `file-end` / `file-cancel` 分支）：
+
+- `file-meta` 到达时新建 `ReceiverState { meta, chunks: Map<index, ArrayBuffer>, received }` 并插入 `transfers` 列表，UI 立即显示一张接收卡片
+- `file-chunk` 到达时写入对应槽位、累加 `received` 字节、增量更新进度
+- `file-end` 到达时按 `index` 升序取出所有 `ArrayBuffer` → `new Blob(arr, { type: mime })` → `URL.createObjectURL` → 触发隐藏 `<a download>` 的点击 → 1 秒后 `revokeObjectURL` 释放
+- `file-cancel` 到达时清理本地状态、标记为 `canceled`
+
+**UI**（`Toolbar` 内 `.transfers-bar`）：
+
+- 工具栏下方独立横条，多文件横向滚动
+- 每张卡片：方向徽章（↑ 发送蓝 / ↓ 接收紫）+ 文件名 + 大小 + 4px 进度条 + 状态文案 + 取消按钮
+- 进度条颜色随状态变化：active 跟随主题色、done 绿、error 红、canceled 灰
+- 已完成 / 失败 / 取消的卡片 3 秒后自动消失（`scheduleRemoval` 用 `setTimeout` 派发 `setTransfers` 过滤）
+- 连接断开时 `bindLifecycle` 的 `close` 回调把所有 `active` 状态的卡片改为 `error: '连接已断开'`
 
 ## 许可证
 

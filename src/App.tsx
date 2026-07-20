@@ -17,7 +17,10 @@ function AppContent() {
     setContent(remote)
   }, [setContent])
 
-  const { myId, status, error, incomingFrom, awaitingAccept, init, acceptConn, rejectConn, connect, disconnect, send } = usePeer({ onRemoteContent: handleRemoteContent })
+  const {
+    myId, status, error, incomingFrom, awaitingAccept, transfers,
+    init, acceptConn, rejectConn, connect, disconnect, send, sendFile, cancelTransfer,
+  } = usePeer({ onRemoteContent: handleRemoteContent })
 
   // 连接刚建立时,主动同步一次本地内容给对方
   const prevStatus = useRef(status)
@@ -42,11 +45,14 @@ function AppContent() {
         peerError={error}
         incomingFrom={incomingFrom}
         awaitingAccept={awaitingAccept}
+        transfers={transfers}
         onInit={init}
         onConnect={connect}
         onDisconnect={disconnect}
         onAccept={acceptConn}
         onReject={rejectConn}
+        onSendFile={sendFile}
+        onCancelTransfer={cancelTransfer}
       />
       <div className="main">
         <div className="pane pane-editor">
