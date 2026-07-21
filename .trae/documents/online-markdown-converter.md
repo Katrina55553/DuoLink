@@ -1,4 +1,4 @@
-# MDTool · 双机传输 - 实施计划
+# DuoLink · 双机传输 - 实施计划
 
 ## 一、需求摘要
 
@@ -66,7 +66,7 @@
 ## 四、项目结构
 
 ```
-MDTool/
+DuoLink/
 ├── .github/workflows/
 │   └── deploy.yml                  # GitHub Pages 自动部署工作流
 ├── src/
@@ -204,7 +204,7 @@ interface Message {
 ### 步骤 4：Toolbar 视图切换按钮
 
 - 新增 `view` / `onSwitchView` props
-- 标题改为「P2P 传输」
+- 标题改为「DuoLink」
 - 新增「Markdown 工具 / 返回传输」切换按钮
 - markdown 视图下才显示 `.transfers-bar`（transfer 视图由 MessageStream 接管）
 

@@ -141,7 +141,7 @@ export default function Toolbar({
   return (
     <header className="toolbar">
       <div className="toolbar-brand">
-        <div className="toolbar-title">P2P 传输</div>
+        <div className="toolbar-title">DuoLink</div>
       </div>
 
       <div className="peer-panel">

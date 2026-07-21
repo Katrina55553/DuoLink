@@ -1,6 +1,6 @@
-export const sampleContent = `# Markdown 转换器
+export const sampleContent = `# DuoLink 共享笔记
 
-一个纯前端的在线 Markdown 渲染工具，支持 **GFM**、代码高亮、数学公式与 Mermaid 图表。
+DuoLink 内置 Markdown 编辑器，支持 **GFM**、代码高亮、数学公式与 Mermaid 图表。
 
 ## 功能特性
 

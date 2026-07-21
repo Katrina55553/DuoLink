@@ -1,33 +1,35 @@
-# MDTool · 双机传输
+# DuoLink · 双机传输
 
-一个纯前端的点对点传输工具，两台设备通过 WebRTC 直连，实时同步文字、互发图片与文件，**无需登录、无需后端、无需中转服务器**。内置一个 Markdown 编辑器作为次要工具，可一键切换。
+一个纯前端的点对点传输工具，两台设备通过 WebRTC 直连，实时同步文字、互发图片与文件，**无需登录、无需后端、无需中转服务器**。内置 Markdown 共享笔记，支持实时预览。
 
-🔗 在线体验：<https://katrina55553.github.io/MDTool/>
+🔗 在线体验：<https://katrina55553.github.io/DuoLink/>
 
 ## 功能特性
 
 ### 核心功能：双机传输
 
 - **P2P 直连** —— 基于 PeerJS / WebRTC，握手后两台设备直接传输数据，不经过任何自建服务器
-- **共享笔记** —— 底部文本框双方实时同步编辑，适合快速共享一段文字、URL、代码片段
+- **共享笔记** —— 内置 Markdown 编辑器 + 实时预览，支持多笔记管理，双方 P2P 实时同步
 - **图片传输** —— 图片发送后接收方**直接内联显示**在消息流里，点击可下载；不强制保存到本地
 - **文件传输** —— 任意类型文件，单文件 ≤ 200MB，分片 + 背压控制保证大文件稳定
 - **消息流** —— 聊天式布局，发送方右对齐、接收方左对齐，传输进度实时可见
 - **接收无需确认** —— 文件/图片到达即接收，不弹确认窗，类似同房间设备间的「AirDrop」体验
 - **可取消** —— 传输过程中任一方可点「×」中断，对方会同步停止
 
-### 次要功能：Markdown 工具
+### 共享笔记（Markdown）
 
-- **实时预览** —— 左侧编辑器输入，右侧即时渲染
+- **多笔记管理** —— 左侧笔记列表，支持新建、切换、删除
+- **实时预览** —— 左侧 CodeMirror 编辑，右侧即时渲染
 - **GFM 支持** —— 表格、任务列表、删除线、自动链接
 - **代码高亮** —— 基于 highlight.js
 - **数学公式** —— KaTeX 渲染，兼容 LaTeX 语法
 - **Mermaid 图表** —— 流程图、时序图、类图等
+- **P2P 同步** —— 连接后整份笔记状态（列表 + 内容）双方实时同步
 
 ### 通用特性
 
 - **主题切换** —— 深色 / 浅色双主题，跟随系统首选项
-- **本地缓存** —— 共享笔记与 Markdown 内容自动保存到 localStorage
+- **本地缓存** —— 共享笔记与主题选择自动保存到 localStorage
 - **响应式布局** —— 桌面端左右分栏，移动端自动堆叠
 - **零后端依赖** —— 纯前端部署，可直接托管到任何静态站点服务
 
@@ -83,13 +85,14 @@ npm run preview
 
 若 B 点「拒绝」，A 会收到「对方拒绝连接」提示并自动回到待机状态。
 
-### 传输文字
+### 共享笔记
 
-连接成功后，主界面底部的「共享笔记」文本框可双方实时同步编辑：
+连接成功后，主界面下方的「共享笔记」区域可双方实时同步编辑：
 
-- 任一方输入文字，另一方文本框内容实时同步
-- 内容会自动保存到 localStorage，刷新不丢失
-- 同步策略：每次按键即发送当前全文给对方，对方直接覆盖本地内容
+- 左侧笔记列表管理多篇 Markdown 笔记，右侧为编辑器 + 预览
+- 任一方编辑、切换笔记、新建或删除，另一方实时同步
+- 内容自动保存到 localStorage，刷新不丢失
+- 同步策略：本地变更即推送整份笔记状态给对方，简单覆盖、不合并
 - 适合「一人主笔 + 另一人补充」的场景；两人同时编辑同一段会互相覆盖
 
 ### 传输图片与文件
@@ -104,16 +107,12 @@ npm run preview
    - **其他文件**：浏览器自动触发下载，消息流留一条记录（可点击再次下载）
 5. 传输过程中任一方可点「×」取消，对方会收到 `file-cancel` 消息并停止
 
-### 切换到 Markdown 工具
-
-工具栏左侧有「Markdown 工具」按钮，点击切换到原 Markdown 编辑器 + 预览布局。Markdown 内容仅本地使用，不参与 P2P 同步。点「返回传输」回到主界面。
-
 ## 协作机制
 
 - **ID 分配**：用户在工具栏手动输入 1-99 的整数作为 PeerJS 客户端 ID。由于 PeerJS 公共信令服务器上的 ID 全局唯一，100 以内的数字极易冲突，被占用时会提示并允许换号重试
 - **连接确认**：主动方发起连接后先发送 `hello` 控制消息，被动方收到 `connection` 事件后进入 `incoming` 状态并在 UI 上显示接受/拒绝按钮。被动方接受则回 `accept`，双方进入已连接状态；拒绝则回 `reject` 并关闭，主动方收到明确反馈后回到待机
 - **传输方式**：PeerJS 默认走官方公共信令服务器（`0.peerjs.com`）完成一次握手，握手成功后两台设备之间建立 WebRTC 数据通道直连，数据在浏览器之间点对点传输，不经过任何自建后端
-- **文字同步粒度**：每次本地编辑（按键触发）即发送当前全文给对方，对方直接覆盖本地内容
+- **文字同步粒度**：本地变更（编辑、切换笔记、新建、删除）即推送整份 `NotesState` 给对方
 - **文字冲突策略**：简单覆盖，不合并、不锁定
 - **首次同步**：连接刚建立（双方都进入 connected）时各推送一次当前笔记内容给对方，后到者覆盖先到者
 - **文件传输协议**：在原有连接控制消息（`hello`/`accept`/`reject`）之上扩展四类消息：
@@ -130,24 +129,29 @@ npm run preview
 ## 项目结构
 
 ```
-MDTool/
+DuoLink/
 ├── .github/workflows/
 │   └── deploy.yml                  # GitHub Pages 自动部署工作流
 ├── src/
 │   ├── components/
-│   │   ├── Editor.tsx              # CodeMirror 编辑器封装（Markdown 视图）
+│   │   ├── Editor.tsx              # CodeMirror 编辑器封装
 │   │   ├── Preview.tsx             # react-markdown 渲染与插件配置
 │   │   ├── MermaidBlock.tsx        # Mermaid 代码块自定义渲染
 │   │   ├── MessageStream.tsx       # 消息流组件（图片/文件卡片 + 进度）
-│   │   └── Toolbar.tsx             # 顶部工具栏（视图切换 + P2P 面板 + 主题）
+│   │   ├── NoteSidebar.tsx         # 笔记列表侧栏
+│   │   └── Toolbar.tsx             # 顶部工具栏（品牌 + P2P 面板 + 主题）
 │   ├── context/
 │   │   └── ThemeContext.tsx        # 主题 Context + Provider
 │   ├── hooks/
 │   │   ├── useLocalStorage.ts      # localStorage 持久化 Hook
+│   │   ├── useNotes.ts             # 多笔记状态管理
 │   │   └── usePeer.ts              # PeerJS 连接、文件传输、消息流封装
+│   ├── types/
+│   │   └── note.ts                 # 笔记类型定义
 │   ├── utils/
-│   │   └── sampleContent.ts        # Markdown 视图初始示例内容
-│   ├── App.tsx                     # 根组件（视图切换 + 状态编排）
+│   │   ├── noteUtils.ts            # 笔记工具函数与迁移
+│   │   └── sampleContent.ts        # 初始示例 Markdown 内容
+│   ├── App.tsx                     # 根组件（消息流 + 共享笔记编排）
 │   ├── main.tsx                    # 应用入口
 │   └── index.css                   # 全局样式 + CSS 变量主题
 ├── index.html
@@ -176,14 +180,14 @@ MDTool/
 
 ## 实现要点
 
-### 视图切换
+### 界面布局
 
-`App.tsx` 维护一个 `view: 'transfer' | 'markdown'` 状态，默认 `transfer`：
+主界面分为上下两部分：
 
-- **transfer 视图**：上方 `<MessageStream>`（flex:1）+ 下方「共享笔记」`<textarea>`（200px 固定高度）
-- **markdown 视图**：原 `<Editor>` + `<Preview>` 左右分栏
+- **上方消息流**（`<MessageStream>`，flex:1）：图片/文件传输记录与进度
+- **下方共享笔记**（flex:1）：笔记侧栏 + Markdown 编辑器 + 实时预览
 
-工具栏左侧的「Markdown 工具 / 返回传输」按钮切换视图。两种视图共享同一个 `usePeer` 实例，意味着在 Markdown 视图下连接与传输照常进行，传输条仍会出现在工具栏下方。
+连接建立后，消息传输与笔记同步共用同一个 `usePeer` 实例。
 
 ### 主题切换
 
@@ -197,9 +201,10 @@ MDTool/
 
 `useLocalStorage` Hook 通用化封装 localStorage 读写，JSON 序列化 + try-catch 容错。用于持久化：
 
-- 共享笔记内容（key: `note-content`）
-- Markdown 编辑器内容（key: `md-content`）
+- 共享笔记状态（key: `md-notes`）
 - 主题选择（key: `md-theme`）
+
+旧版 `md-content` / `note-content` 会在首次加载时自动迁移到 `md-notes`。
 
 ### P2P 连接
 
@@ -213,7 +218,7 @@ MDTool/
 | `accept` | 被动方 → 主动方 | 接受连接，双方进入 connected |
 | `reject` | 被动方 → 主动方 | 拒绝连接，主动方收到反馈并回到待机 |
 
-字符串内容（共享笔记同步）仍走同一 `DataConnection` 传输，`usePeer` 通过 `typeof data === 'string'` 区分控制消息与文本内容。
+字符串内容（共享笔记 `NotesState` JSON）仍走同一 `DataConnection` 传输，`usePeer` 通过 `typeof data === 'string'` 区分控制消息与文本内容。
 
 ### 文件传输
 
@@ -256,10 +261,6 @@ MDTool/
 - **自动滚动**：新消息或进度变化时 `scrollTop = scrollHeight`
 - **清空记录**：右上角「清空」按钮调用 `clearMessages`，同时 `revokeObjectURL` 释放 blobUrl 避免内存泄漏
 - **空状态**：未连接或无消息时显示引导文案
-
-### 传输卡片（Markdown 视图下）
-
-在 Markdown 视图下，工具栏下方仍会显示 `.transfers-bar` 横条卡片（与 transfer 视图的消息流独立），保证用户切到 Markdown 视图时也能看到传输进度。每张卡片包含方向徽章（↑ 发送蓝 / ↓ 接收紫）+ 文件名 + 大小 + 4px 进度条 + 状态文案 + 取消按钮。已完成 / 失败 / 取消的卡片 3 秒后自动消失。
 
 ## 许可证
 
